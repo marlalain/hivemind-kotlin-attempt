@@ -1,48 +1,43 @@
 package com.albuque.hivemind.entities.tasks
 
-import com.albuque.hivemind.config.KafkaStreamConfig.Companion.props
-import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.clients.consumer.KafkaConsumer
+import com.albuque.hivemind.exceptions.ServerNotReadyException
+import org.apache.kafka.streams.KafkaStreams
+import org.apache.kafka.streams.KafkaStreams.State.RUNNING
+import org.apache.kafka.streams.StoreQueryParameters
+import org.apache.kafka.streams.state.QueryableStoreTypes
+import org.apache.kafka.streams.state.ReadOnlyKeyValueStore
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory.getLogger
-import org.springframework.context.annotation.Bean
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.stereotype.Component
-import kotlin.concurrent.thread
 
 @Component
-class TaskRepository {
+class TaskRepository(@Qualifier("kafkaStreams") private val kafkaStreams: KafkaStreams) {
 	companion object {
 		val logger: Logger = getLogger(TaskRepository::class.java)
 		const val TOPIC_NAME = "tasks-topic"
 		const val STREAM_NAME = "tasks-streams"
+		const val TABLE_NAME = "tasks-table"
 	}
 
-	private val tasks = mutableMapOf<String, Task>()
-
-	@Bean
-	fun kafkaConsumer(): KafkaConsumer<String, Task> {
-		val kafkaConsumer: KafkaConsumer<String, Task> = KafkaConsumer(
-			props.plus(
-				mapOf(
-					ConsumerConfig.GROUP_ID_CONFIG to "hivemind-group",
-					ConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest",
-				)
-			)
-		)
-		kafkaConsumer.subscribe(listOf(TOPIC_NAME))
-
-		thread {
-			while (true) {
-				val message = kafkaConsumer.poll(java.time.Duration.ofMinutes(1))
-				message.forEach { record ->
-					logger.info("Consuming ${record.key()} -> ${record.value()}")
-					tasks[record.key()] = record.value()
-				}
+	val store: ReadOnlyKeyValueStore<String, Task>
+		get() {
+			if (kafkaStreams.state() === RUNNING) {
+				return kafkaStreams.store(StoreQueryParameters.fromNameAndType(TABLE_NAME, QueryableStoreTypes.keyValueStore()))
 			}
+
+			throw ServerNotReadyException()
 		}
 
-		return kafkaConsumer.also { Runtime.getRuntime().addShutdownHook(Thread(it::close)) }
+	fun findAll(): List<Task> {
+		val tasks = mutableListOf<Task>()
+		store.all().forEachRemaining { task -> tasks.add(task.value.copy(id = task.key)) }
+		return tasks
 	}
 
-	fun findAll(): List<Task> = tasks.map { it.value.copy(id = it.key) }
+	fun findById(id: String): Task {
+		return store.get(id)
+	}
+
+	fun has(id: String): Boolean = store.get(id) != null
 }
